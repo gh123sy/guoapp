@@ -67,7 +67,7 @@ func TestProviderSourceParsesTextFixturesAndRejectsMismatchedIdentity(t *testing
 }
 
 func TestYeguoDomainAliasesAndDefaultEndpoint(t *testing.T) {
-	if got := (&Downloader{cfg: defaultConfig()}).providerBaseURL(sourceYeguo); got != "https://analyze.buxefaex.cc" {
+	if got := (&Downloader{cfg: defaultConfig()}).providerBaseURL(sourceYeguo); got != "https://yeguodj.com" {
 		t.Fatalf("unexpected default yeguo endpoint: %s", got)
 	}
 	for _, address := range []string{
@@ -77,6 +77,8 @@ func TestYeguoDomainAliasesAndDefaultEndpoint(t *testing.T) {
 		"https://delta.ygrwdsgt.cc/",
 		"https://yeguodj.com/",
 		"https://ygdj7.com/",
+		"https://boat.gfqbmosa.cc/",
+		"https://cell.fzchosdi.cc/",
 	} {
 		if got := providerSourceForURL(address); got != sourceYeguo {
 			t.Fatalf("yeguo domain was not recognized: %s -> %s", address, got)
@@ -87,6 +89,7 @@ func TestYeguoDomainAliasesAndDefaultEndpoint(t *testing.T) {
 		"delta.ygrwdsgt.cc",
 		"yeguodj.com",
 		"ygdj7.com",
+		"gfqbmosa.cc",
 	} {
 		if got := canonicalProviderSource(alias); got != sourceYeguo {
 			t.Fatalf("yeguo source alias was not canonicalized: %s -> %s", alias, got)
@@ -97,11 +100,11 @@ func TestYeguoDomainAliasesAndDefaultEndpoint(t *testing.T) {
 func TestYeguoTransitPageDiscoversCurrentLineDomains(t *testing.T) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(`<script>
 words = 'abandon,ability,analyze,chair'.split(',');
-lineAry = Vx.map(Vx.range(1, 3), function () { return location.protocol + '//' + words.random() + '.buxefaex.cc' });
+lineAry = Vx.map(Vx.range(1, 3), function () { return location.protocol + '//' + words.random() + '.gfqbmosa.cc' });
 backupLine = Vx.map(Vx.range(1, 3), function () { return location.protocol + '//' + words.random() + '.fzchosdi.cc'; });
 </script>`))
 	sites := yeguoTransitSites(`<script>document.write(Base64.decode("` + encoded + `"));</script>`)
-	want := []string{"https://analyze.buxefaex.cc", "https://ability.buxefaex.cc", "https://abandon.buxefaex.cc", "https://analyze.fzchosdi.cc"}
+	want := []string{"https://analyze.gfqbmosa.cc", "https://ability.gfqbmosa.cc", "https://abandon.gfqbmosa.cc", "https://analyze.fzchosdi.cc"}
 	for _, site := range want {
 		found := false
 		for _, candidate := range sites {

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -29,9 +30,15 @@ import (
 )
 
 const (
-	yeguoBaseURL    = "https://analyze.buxefaex.cc"
-	yeguoTransitURL = "https://ygdj7.com"
+	// yeguoBaseURL 为兜底线路：中转站随机线路全部不可用时才使用。
+	yeguoBaseURL = "https://yeguodj.com"
+	// yeguoAPIBaseDefault 是新版野果页面写死在 JS 里的接口入口（路由仍以 /api/ 开头）。
+	yeguoAPIBaseDefault = "https://www.yeguodj.com/api.php"
+	yeguoTransitURL     = "https://ygdj7.com"
 )
+
+// yeguoLineCacheTTL 控制中转站随机线路的缓存时间。
+const yeguoLineCacheTTL = 10 * time.Minute
 
 var (
 	errYeguoDecode        = errors.New("野果接口响应校验或解码失败")
@@ -68,6 +75,10 @@ type yeguoAPIClient struct {
 	pending    *yeguoAccessCall
 	httpOnce   sync.Once
 	httpClient *http.Client
+
+	linesMu sync.Mutex
+	lines   []string
+	linesAt time.Time
 }
 
 func (d *Downloader) yeguoClient() *yeguoAPIClient {
@@ -111,10 +122,20 @@ func isYeguoActiveSite(raw string) bool {
 		return false
 	}
 	host := strings.ToLower(address.Hostname())
-	return host == "analyze.buxefaex.cc" ||
-		strings.HasSuffix(host, ".buxefaex.cc") ||
-		strings.HasSuffix(host, ".fzchosdi.cc")
+	if host == "yeguodj.com" || host == "www.yeguodj.com" {
+		return true
+	}
+	for _, suffix := range yeguoLineSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return false
 }
+
+// yeguoLineSuffixes 是中转站随机线路使用的域名后缀，按“首选 → 备用”排序。
+// 中转站页面用 words.random() + '.' + 后缀 生成线路，这里保持一致。
+var yeguoLineSuffixes = []string{"gfqbmosa.cc", "fzchosdi.cc", "buxefaex.cc"}
 
 func yeguoTransitDecodedText(body string) string {
 	var parts []string
@@ -128,48 +149,50 @@ func yeguoTransitDecodedText(body string) string {
 	return strings.Join(parts, "\n")
 }
 
-func yeguoTransitSeedWords(text string) []string {
+// yeguoTransitWordsList 返回中转站页面词表（浏览器用 words.random() 随机取词）。
+func yeguoTransitWordsList(text string) []string {
+	match := yeguoTransitWords.FindStringSubmatch(text)
+	if len(match) < 2 || len(match[1]) > 200000 {
+		return nil
+	}
 	var words []string
 	seen := map[string]bool{}
-	add := func(word string) {
+	for _, word := range strings.Split(match[1], ",") {
 		word = strings.ToLower(strings.TrimSpace(word))
-		if yeguoTransitHostLabel.MatchString(word) && !seen[word] && len(words) < 4 {
+		if yeguoTransitHostLabel.MatchString(word) && !seen[word] {
 			seen[word] = true
 			words = append(words, word)
 		}
 	}
-	var all []string
-	if match := yeguoTransitWords.FindStringSubmatch(text); len(match) > 1 {
-		if len(match[1]) > 20000 {
-			return []string{"analyze"}
-		}
-		for _, word := range strings.Split(match[1], ",") {
-			cleaned := strings.ToLower(strings.TrimSpace(word))
-			if yeguoTransitHostLabel.MatchString(cleaned) {
-				all = append(all, cleaned)
-			}
-		}
-	}
-	available := map[string]bool{}
-	for _, word := range all {
-		available[word] = true
-	}
-	for _, preferred := range []string{"analyze", "ability", "abandon"} {
-		if len(all) == 0 || available[preferred] {
-			add(preferred)
-		}
-	}
-	for _, word := range all {
-		add(word)
-	}
-	if len(words) == 0 {
-		words = []string{"analyze"}
-	}
 	return words
 }
 
+// yeguoTransitSuffixList 返回页面里出现的线路后缀，保持出现顺序（首选在前）。
+func yeguoTransitSuffixList(text string) []string {
+	var suffixes []string
+	seen := map[string]bool{}
+	for _, match := range yeguoTransitSuffix.FindAllStringSubmatch(text, 16) {
+		suffix := strings.ToLower(strings.Trim(strings.TrimSpace(match[1]), "."))
+		if suffix == "" || !strings.Contains(suffix, ".") || seen[suffix] {
+			continue
+		}
+		seen[suffix] = true
+		suffixes = append(suffixes, suffix)
+	}
+	return suffixes
+}
+
+// yeguoTransitSites 复现中转站的生成规则：词表随机词 + 后缀，按后缀优先顺序枚举候选。
 func yeguoTransitSites(body string) []string {
 	text := yeguoTransitDecodedText(body)
+	words := yeguoTransitWordsList(text)
+	suffixes := yeguoTransitSuffixList(text)
+	if len(suffixes) == 0 {
+		suffixes = append([]string(nil), yeguoLineSuffixes...)
+	}
+	if len(words) == 0 {
+		words = []string{"analyze", "ability", "abandon"}
+	}
 	var sites []string
 	seen := map[string]bool{}
 	add := func(site string) {
@@ -179,19 +202,12 @@ func yeguoTransitSites(body string) []string {
 		}
 	}
 	for _, match := range yeguoTransitLiteral.FindAllString(text, 32) {
-		if parsed, err := url.Parse(match); err == nil {
-			host := strings.ToLower(parsed.Hostname())
-			if strings.HasSuffix(host, ".buxefaex.cc") || strings.HasSuffix(host, ".fzchosdi.cc") {
-				add(match)
-			}
+		host := strings.ToLower(match)
+		if isYeguoActiveSite(host) && !strings.Contains(host, "yeguodj.com") {
+			add(match)
 		}
 	}
-	words := yeguoTransitSeedWords(text)
-	for _, match := range yeguoTransitSuffix.FindAllStringSubmatch(text, 8) {
-		suffix := strings.ToLower(strings.Trim(match[1], "."))
-		if suffix == "" {
-			continue
-		}
+	for _, suffix := range suffixes {
 		for _, word := range words {
 			add("https://" + word + "." + suffix)
 		}
@@ -199,12 +215,118 @@ func yeguoTransitSites(body string) []string {
 	return sites
 }
 
-func (client *yeguoAPIClient) discoverTransitSites(ctx context.Context) []string {
+// yeguoRandomLineCandidates 按 words.random() 的规则抽样，每个后缀取 perSuffix 个随机词。
+func yeguoRandomLineCandidates(text string, perSuffix int) []string {
+	words := yeguoTransitWordsList(text)
+	suffixes := yeguoTransitSuffixList(text)
+	if len(suffixes) == 0 {
+		suffixes = append([]string(nil), yeguoLineSuffixes...)
+	}
+	if len(words) == 0 || perSuffix <= 0 {
+		return nil
+	}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	var sites []string
+	seen := map[string]bool{}
+	for _, suffix := range suffixes {
+		for i := 0; i < perSuffix; i++ {
+			for attempt := 0; attempt < 8; attempt++ {
+				word := words[rng.Intn(len(words))]
+				site := "https://" + word + "." + suffix
+				if seen[site] {
+					continue
+				}
+				seen[site] = true
+				sites = append(sites, site)
+				break
+			}
+		}
+	}
+	return sites
+}
+
+// yeguoLineUsable 判断一条随机线路是否真的返回野果页面（不是泛解析的空白页）。
+func (client *yeguoAPIClient) yeguoLineUsable(ctx context.Context, site string) bool {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, site+"/", nil)
+	if err != nil {
+		return false
+	}
+	request.Header.Set("User-Agent", userAgent)
+	response, err := client.do(ctx, request, 8*time.Second)
+	if err != nil {
+		return false
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 512<<10))
+	response.Body.Close()
+	if readErr != nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false
+	}
+	text := string(body)
+	return strings.Contains(text, "__NUXT_DATA__") && strings.Contains(text, "_nuxt/")
+}
+
+// transitLines 抓中转站页面，按它的随机规则抽样并并发探活，结果缓存 10 分钟。
+func (client *yeguoAPIClient) transitLines(ctx context.Context) []string {
+	client.linesMu.Lock()
+	if len(client.lines) > 0 {
+		if age := time.Since(client.linesAt); age >= 0 && age < yeguoLineCacheTTL {
+			lines := append([]string(nil), client.lines...)
+			client.linesMu.Unlock()
+			return lines
+		}
+	}
+	client.linesMu.Unlock()
+
 	body, err := client.downloader.fetchProviderText(context.WithValue(ctx, providerTextNoCacheKey{}, true), yeguoTransitURL+"/", yeguoTransitURL+"/")
 	if err != nil {
 		return nil
 	}
-	return yeguoTransitSites(body)
+	candidates := yeguoRandomLineCandidates(yeguoTransitDecodedText(body), 4)
+	if len(candidates) == 0 {
+		return nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	type probeResult struct {
+		index int
+		site  string
+	}
+	results := make(chan probeResult, len(candidates))
+	sem := make(chan struct{}, 6)
+	var wg sync.WaitGroup
+	for index, site := range candidates {
+		wg.Add(1)
+		go func(index int, site string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-probeCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			if client.yeguoLineUsable(probeCtx, site) {
+				results <- probeResult{index: index, site: site}
+			}
+		}(index, site)
+	}
+	go func() { wg.Wait(); close(results) }()
+	var found []probeResult
+	for item := range results {
+		found = append(found, item)
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].index < found[j].index })
+	var lines []string
+	for _, item := range found {
+		lines = append(lines, item.site)
+	}
+	client.linesMu.Lock()
+	client.lines, client.linesAt = lines, time.Now()
+	client.linesMu.Unlock()
+	return lines
+}
+
+func (client *yeguoAPIClient) discoverTransitSites(ctx context.Context) []string {
+	return client.transitLines(ctx)
 }
 
 func (client *yeguoAPIClient) configuration(ctx context.Context) (*yeguoAccess, error) {
@@ -330,6 +452,10 @@ func yeguoAPIBase(document *html.Node, configured string) (string, error) {
 			}
 		}
 	}
+	if base == "" {
+		// 新版野果页面把接口入口写死在前端包里，页面不再提供 apiBaseURL。
+		base = yeguoAPIBaseDefault
+	}
 	address, err := url.Parse(base)
 	if err != nil || !isProviderHTTPMediaURL(base) || address.User != nil || address.RawQuery != "" || address.Fragment != "" {
 		return "", errors.New("野果页面未提供有效的接口入口")
@@ -388,7 +514,7 @@ func parseYeguoPublicConfiguration(script string) *yeguoAccess {
 }
 
 func (client *yeguoAPIClient) discoverConfiguration(ctx context.Context) (*yeguoAccess, error) {
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	seen := map[string]bool{}
 	var sites []string
@@ -398,21 +524,20 @@ func (client *yeguoAPIClient) discoverConfiguration(ctx context.Context) (*yeguo
 			sites = append(sites, site)
 		}
 	}
+	// 首选：从中转站随机生成并探活通过的线路。
+	for _, site := range client.discoverTransitSites(ctx) {
+		add(site)
+	}
 	add(client.site)
+	// 兜底：yeguodj.com 永远排最后。
 	add(yeguoBaseURL)
 	var lastErr error
-	for index := 0; index < len(sites); index++ {
-		site := sites[index]
+	for _, site := range sites {
 		access, err := client.discoverConfigurationAt(ctx, site)
 		if err == nil {
 			return access, nil
 		}
 		lastErr = err
-		if index == 0 {
-			for _, site := range client.discoverTransitSites(ctx) {
-				add(site)
-			}
-		}
 	}
 	return nil, errors.Join(errors.New("野果线路暂不可用，请稍后重试"), lastErr)
 }
