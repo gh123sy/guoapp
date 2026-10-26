@@ -16,7 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	mrand "math/rand"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -225,7 +225,7 @@ func yeguoRandomLineCandidates(text string, perSuffix int) []string {
 	if len(words) == 0 || perSuffix <= 0 {
 		return nil
 	}
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 	var sites []string
 	seen := map[string]bool{}
 	for _, suffix := range suffixes {
