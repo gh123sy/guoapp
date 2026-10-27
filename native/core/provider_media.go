@@ -70,9 +70,9 @@ func providerSourceForURL(raw string) string {
 		return sourceHuangju
 	case host == "ygdj7.com" || host == "www.ygdj7.com" ||
 		host == "analyze.buxefaex.cc" || strings.HasSuffix(host, ".buxefaex.cc") ||
-		strings.HasSuffix(host, ".fzchosdi.cc") ||
-		strings.HasSuffix(host, ".gfqbmosa.cc") ||
-		host == "delta.ygrwdsgt.cc" || host == "yeguodj.com" || host == "www.yeguodj.com":
+		host == "delta.ygrwdsgt.cc" || host == "yeguodj.com" || host == "www.yeguodj.com" ||
+		host == "ygdj17.com" || host == "www.ygdj17.com" ||
+		isYeguoLineHost(host):
 		return sourceYeguo
 	case host == "dsd.com.se" || host == "www.dsd.com.se":
 		return sourceDSD

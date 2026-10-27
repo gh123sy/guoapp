@@ -33,7 +33,7 @@ const (
 	// yeguoBaseURL 为兜底线路：中转站随机线路全部不可用时才使用。
 	yeguoBaseURL = "https://yeguodj.com"
 	// yeguoAPIBaseDefault 是新版野果页面写死在 JS 里的接口入口（路由仍以 /api/ 开头）。
-	yeguoAPIBaseDefault = "https://www.yeguodj.com/api.php"
+	yeguoAPIBaseDefault = "https://ygdj17.com/api.php"
 	yeguoTransitURL     = "https://ygdj7.com"
 )
 
@@ -122,20 +122,62 @@ func isYeguoActiveSite(raw string) bool {
 		return false
 	}
 	host := strings.ToLower(address.Hostname())
-	if host == "yeguodj.com" || host == "www.yeguodj.com" {
+	switch host {
+	case "yeguodj.com", "www.yeguodj.com", "ygdj17.com", "www.ygdj17.com", "ygdj7.com", "www.ygdj7.com":
 		return true
 	}
-	for _, suffix := range yeguoLineSuffixes {
-		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+	return isYeguoLineHost(host)
+}
+
+// yeguoLineSuffixes 是中转站随机线路的初始后缀。
+// 后缀会轮换（实测见过 gfqbmosa.cc / cyqpdsqc.cc / fzchosdi.cc），
+// 每次解析中转站页面后由 yeguoRegisterSuffixes 动态补充，不能写死。
+var yeguoLineSuffixes = []string{"gfqbmosa.cc", "cyqpdsqc.cc", "fzchosdi.cc", "buxefaex.cc"}
+
+var (
+	yeguoSuffixMu sync.RWMutex
+	yeguoSuffixes = map[string]bool{
+		"gfqbmosa.cc": true,
+		"cyqpdsqc.cc": true,
+		"fzchosdi.cc": true,
+		"buxefaex.cc": true,
+	}
+)
+
+// yeguoRegisterSuffixes 记录中转站当前使用的线路后缀，避免后缀轮换后线路被过滤掉。
+func yeguoRegisterSuffixes(suffixes []string) {
+	if len(suffixes) == 0 {
+		return
+	}
+	yeguoSuffixMu.Lock()
+	defer yeguoSuffixMu.Unlock()
+	for _, suffix := range suffixes {
+		suffix = strings.ToLower(strings.Trim(strings.TrimSpace(suffix), "."))
+		if suffix == "" || !strings.Contains(suffix, ".") {
+			continue
+		}
+		yeguoSuffixes[suffix] = true
+	}
+}
+
+// isYeguoLineHost 判断主机名是否属于野果随机线路（含动态发现的轮换后缀）。
+func isYeguoLineHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	yeguoSuffixMu.RLock()
+	defer yeguoSuffixMu.RUnlock()
+	if yeguoSuffixes[host] {
+		return true
+	}
+	for suffix := range yeguoSuffixes {
+		if strings.HasSuffix(host, "."+suffix) {
 			return true
 		}
 	}
 	return false
 }
-
-// yeguoLineSuffixes 是中转站随机线路使用的域名后缀，按“首选 → 备用”排序。
-// 中转站页面用 words.random() + '.' + 后缀 生成线路，这里保持一致。
-var yeguoLineSuffixes = []string{"gfqbmosa.cc", "fzchosdi.cc", "buxefaex.cc"}
 
 func yeguoTransitDecodedText(body string) string {
 	var parts []string
@@ -179,6 +221,7 @@ func yeguoTransitSuffixList(text string) []string {
 		seen[suffix] = true
 		suffixes = append(suffixes, suffix)
 	}
+	yeguoRegisterSuffixes(suffixes)
 	return suffixes
 }
 
@@ -424,7 +467,7 @@ func (client *yeguoAPIClient) do(ctx context.Context, request *http.Request, tim
 	return response, nil
 }
 
-func yeguoAPIBase(document *html.Node, configured string) (string, error) {
+func yeguoAPIBase(document *html.Node, configured, site string) (string, error) {
 	base := strings.TrimRight(configured, "/")
 	if base == "" {
 		for _, node := range providerHTMLNodes(document, func(node *html.Node) bool {
@@ -453,7 +496,13 @@ func yeguoAPIBase(document *html.Node, configured string) (string, error) {
 		}
 	}
 	if base == "" {
-		// 新版野果页面把接口入口写死在前端包里，页面不再提供 apiBaseURL。
+		// 新版野果页面不再提供 apiBaseURL，但每条随机线路自带 /api.php，
+		// 实测 1~2 秒返回，远快于写死的兜底入口（后者要 25 秒）。
+		if candidate := strings.TrimRight(site, "/") + "/api.php"; isProviderHTTPMediaURL(candidate) {
+			base = candidate
+		}
+	}
+	if base == "" {
 		base = yeguoAPIBaseDefault
 	}
 	address, err := url.Parse(base)
@@ -548,7 +597,7 @@ func (client *yeguoAPIClient) discoverConfigurationAt(ctx context.Context, site 
 	if err != nil {
 		return nil, err
 	}
-	apiBase, err := yeguoAPIBase(document, d.cfg.YeguoAPIURL)
+	apiBase, err := yeguoAPIBase(document, d.cfg.YeguoAPIURL, site)
 	if err != nil {
 		return nil, err
 	}
